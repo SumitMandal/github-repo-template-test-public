@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# commit-msg: require Conventional Commits, e.g. "feat(api): add partial refunds".
+# Install once per clone:  ./scripts/install-hooks.sh
+set -euo pipefail
+
+# The message isn't cleaned up yet when this hook runs: drop comment lines and
+# leading blank lines first, as git will. Known gap: `git commit -m "#123"` keeps
+# a leading "#" line that this treats as a comment, and the hook can't tell which
+# cleanup mode git will use. The server-side pr-title check covers merged commits.
+subject=$(git stripspace --strip-comments < "$1" | head -n1)
+
+# Let git's own generated messages through.
+[[ "$subject" =~ ^(Merge (branch|branches|pull request|remote-tracking branch|tag|commit) |Revert \"|fixup! |squash! |amend! ) ]] && exit 0
+
+types='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+pattern="^($types)(\([a-z0-9._/-]+\))?!?: [^ ].*$"
+
+if [[ ! "$subject" =~ $pattern ]]; then
+  printf '\033[31m%s\033[0m\n' "commit-msg: '$subject' is not a Conventional Commit." >&2
+  echo "  Format: <type>(<optional scope>): <description>" >&2
+  echo "  Types:  ${types//|/, }" >&2
+  echo "  Example: feat(api): add partial refund endpoint" >&2
+  exit 1
+fi
+
+if (( ${#subject} > 72 )); then
+  printf '\033[31m%s\033[0m\n' "commit-msg: subject is ${#subject} characters; keep it to 72 or fewer." >&2
+  exit 1
+fi

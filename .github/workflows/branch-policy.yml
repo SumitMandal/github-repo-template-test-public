@@ -1,0 +1,170 @@
+name: Branch policy
+
+# Rulesets cannot restrict which branch a pull request comes from, so these
+# required checks enforce the promotion path:
+#   feature/* -> develop -> stage -> (cut) release/x.y.z -> main, hotfix/* -> main
+#
+# A PR can edit this file to make its own check pass. That is why every protected
+# branch requires code owner review and CODEOWNERS covers /.github/.
+#
+# GitHub attaches check results to the head commit, not to the PR. When several
+# open PRs share a head commit (e.g. main -> develop and main -> release/x.y.z),
+# the newest run would decide for all of them, so each job checks every open PR
+# on the commit and fails if any of them breaks the rules.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  REPO: ${{ github.repository }}
+  SHA: ${{ github.event.pull_request.head.sha }}
+  # The triggering PR, used only if the commit lookup returns no open PRs (e.g. some fork PRs).
+  THIS_PR: ${{ github.event.pull_request.number }}
+  THIS_BASE: ${{ github.base_ref }}
+  THIS_HEAD: ${{ github.head_ref }}
+  THIS_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+  THIS_TITLE: ${{ github.event.pull_request.title }}
+  THIS_AUTHOR: ${{ github.event.pull_request.user.login }}
+
+jobs:
+  # Job names are required status checks in .github/rulesets/. Rename both together.
+  branch-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check source and target branches of every open PR on this commit
+        run: |
+          prs=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+            --jq '.[] | select(.state == "open") | [.number, .base.ref, .head.ref, .head.repo.full_name] | @tsv')
+          [[ -n "$prs" ]] || prs="$THIS_PR"$'\t'"$THIS_BASE"$'\t'"$THIS_HEAD"$'\t'"$THIS_HEAD_REPO"
+
+          # PRs into stage, release/* and main must come from this repository,
+          # otherwise a fork could name its branch hotfix/x and pass the check.
+          allowed() {  # allowed <base> <head> <head repo>
+            local base=$1 head=$2 same=0
+            [[ "$3" == "$REPO" ]] && same=1
+            case "$base" in
+              main)       (( same )) && [[ "$head" == release/* || "$head" == hotfix/* ]] ;;
+              release/*)  (( same )) && [[ "$head" =~ ^(bugfix|hotfix|backmerge)/ || "$head" == main ]] ;;
+              stage)      (( same )) && [[ "$head" == develop ]] ;;
+              develop)    [[ "$head" =~ ^(feature|bugfix|hotfix|release|backmerge|dependabot)/ || "$head" == main ]] ;;
+              *)          true ;;  # unprotected base branches are not restricted
+            esac
+          }
+          # The same naming rule as githooks/pre-commit: a lowercase prefix, then letters
+          # (an uppercase ticket key is fine), digits, . _ -. Long-lived and Dependabot heads are exempt.
+          name_ok() {
+            [[ "$1" =~ ^(main|stage|develop|dependabot/.+)$ ]] ||
+              [[ "$1" =~ ^(feature|bugfix|hotfix|release|backmerge)/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+          }
+          failed=0
+          while IFS=$'\t' read -r num base head head_repo; do
+            [[ -z "$num" ]] && continue
+            if ! name_ok "$head"; then
+              echo "::error::#$num: branch name '$head' doesn't follow the naming rule, e.g. feature/PROJ-123-add-login."
+              failed=1
+            elif allowed "$base" "$head" "$head_repo"; then
+              echo "OK: #$num $head_repo:$head -> $base"
+            else
+              echo "::error::#$num: pull requests from '$head_repo:$head' into '$base' are not allowed."
+              failed=1
+            fi
+          done <<<"$prs"
+          if (( failed )); then
+            echo "Branch names: feature|bugfix|hotfix|release|backmerge/ + letters, digits, . _ -"
+            echo "  (GitHub's web interface suggests names like 'user-patch-1': rename the branch.)"
+            echo "Allowed: feature|bugfix|hotfix|release|backmerge|dependabot/* or main -> develop;"
+            echo "         develop -> stage; bugfix|hotfix|backmerge/* or main -> release/*;"
+            echo "         release/* or hotfix/* -> main."
+            echo "PRs into stage, release/* and main must come from this repository, not a fork."
+            echo "Release branches are not PR targets from stage: maintainers cut them with"
+            echo "  git push origin origin/stage:refs/heads/release/x.y.z"
+            echo "Open PRs that share a head commit share this result: fix or close the one listed,"
+            echo "then re-run this check on the others."
+            exit 1
+          fi
+
+  # Squash and merge commits use the PR title as the commit subject
+  # (scripts/setup-repo.sh sets this), so it must be a Conventional Commit.
+  pr-title:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check the title of every open PR on this commit
+        run: |
+          prs=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+            --jq '.[] | select(.state == "open") | [.number, .user.login, .title] | @tsv')
+          [[ -n "$prs" ]] || prs="$THIS_PR"$'\t'"$THIS_AUTHOR"$'\t'"$THIS_TITLE"
+
+          types='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+          pattern="^($types)(\([a-z0-9._/-]+\))?!?: [^ ].*$"
+          failed=0
+          while IFS=$'\t' read -r num author title; do
+            [[ -z "$num" ]] && continue
+            if [[ ! "$title" =~ $pattern ]]; then
+              echo "::error::#$num: title '$title' is not a Conventional Commit, e.g. 'feat(api): add partial refunds'."
+              failed=1
+            # Dependabot can't shorten package names, so its titles are exempt from the length limit.
+            elif [[ "$author" != "dependabot[bot]" ]] && (( ${#title} > 72 )); then
+              echo "::error::#$num: title is ${#title} characters; keep it to 72 or fewer."
+              failed=1
+            else
+              echo "OK: #$num $title"
+            fi
+          done <<<"$prs"
+          if (( failed )); then
+            echo "Edit the title; the check re-runs automatically."
+            echo "Open PRs that share a head commit share this result: fix or close the one listed,"
+            echo "then re-run this check on the others."
+            exit 1
+          fi
+
+  # Squash merges replace a PR's commits with one titled by the PR, but merge commits
+  # keep every commit. Local hooks don't run for commits made in GitHub's web interface
+  # (its default message is e.g. "Create test"), so check every commit on short-lived
+  # branches here. Promotion and back-merge PRs carry commits already checked, and
+  # merge commits (e.g. develop merged into a feature branch) are skipped.
+  commit-messages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check the commit messages of every open PR on this commit
+        run: |
+          prs=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+            --jq '.[] | select(.state == "open") | [.number, .head.ref] | @tsv')
+          [[ -n "$prs" ]] || prs="$THIS_PR"$'\t'"$THIS_HEAD"
+
+          types='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+          pattern="^($types)(\([a-z0-9._/-]+\))?!?: [^ ].*$"
+          failed=0
+          while IFS=$'\t' read -r num head; do
+            [[ -z "$num" ]] && continue
+            if [[ ! "$head" =~ ^(feature|bugfix|hotfix)/ ]]; then
+              echo "OK: #$num ($head) is not a feature/, bugfix/ or hotfix/ branch; its commits aren't checked"
+              continue
+            fi
+            while IFS=$'\t' read -r sha subject; do
+              [[ -z "$sha" ]] && continue
+              if [[ ! "$subject" =~ $pattern ]]; then
+                echo "::error::#$num: commit $sha '$subject' is not a Conventional Commit."
+                failed=1
+              elif (( ${#subject} > 72 )); then
+                echo "::error::#$num: commit $sha subject is ${#subject} characters; keep it to 72 or fewer."
+                failed=1
+              else
+                echo "OK: #$num $sha $subject"
+              fi
+            done < <(gh api --paginate "repos/$REPO/pulls/$num/commits" \
+              --jq '.[] | select((.parents | length) < 2) | [.sha[0:7], (.commit.message | split("\n")[0])] | @tsv')
+          done <<<"$prs"
+          if (( failed )); then
+            echo "Reword those commits (git rebase -i, then force-push the branch), or squash-merge the PR"
+            echo "so only its title is kept. In GitHub's web interface, replace the default commit"
+            echo "message (e.g. 'Create test') with one like 'feat: add test file'."
+            exit 1
+          fi

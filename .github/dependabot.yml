@@ -1,0 +1,36 @@
+# Dependabot opens update PRs against develop, so they follow the normal promotion path.
+# Uncomment the entry for your ecosystem below: Dependabot security updates only get
+# Conventional Commit titles (which the required pr-title check needs) for ecosystems
+# listed here; otherwise they are titled "Bump x from 1 to 2" and must be renamed.
+version: 2
+updates:
+  # Workflows pin actions to full commit SHAs (a tag like @v4 can be moved; a SHA can't).
+  # Dependabot updates both the SHA and the "# vX.Y.Z" comment next to it.
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    labels: ["type: chore", "dependencies"]
+    commit-message:
+      prefix: ci
+
+  # Uncomment the ecosystem your project uses.
+  # - package-ecosystem: npm
+  #   directory: /
+  #   target-branch: develop
+  #   schedule:
+  #     interval: weekly
+  #   labels: ["type: chore", "dependencies"]
+  #   commit-message:
+  #     prefix: chore
+  #     include: scope
+
+  # - package-ecosystem: pip
+  #   directory: /
+  #   target-branch: develop
+  #   schedule:
+  #     interval: weekly
+  #   labels: ["type: chore", "dependencies"]
+  #   commit-message:
+  #     prefix: chore

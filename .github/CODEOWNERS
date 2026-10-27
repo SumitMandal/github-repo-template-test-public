@@ -1,0 +1,16 @@
+# Owners are requested for review automatically, and every protected branch
+# requires their approval for the paths they own. The last matching pattern wins.
+# A PR's author can't approve it, so a sole owner's own PRs to these paths
+# need another owner or an admin bypass. Add a second owner to avoid that.
+
+# Repository automation: a PR that edits the branch-policy workflow could make
+# its own check pass, so these paths always need a maintainer.
+/.github/               @SumitMandal
+/githooks/              @SumitMandal
+/scripts/               @SumitMandal
+
+# Uncomment to require a code owner on every PR, or add owners per area
+# (usernames, or @org/team in an organization repo).
+# *                     @SumitMandal
+# /src/api/             @username
+# /src/web/             @username

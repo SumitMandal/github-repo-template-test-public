@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# applypatch-msg: `git am` doesn't run commit-msg, so run the same check on the patch's message.
+exec "$(dirname "$0")/commit-msg" "$@"

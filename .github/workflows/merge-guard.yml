@@ -1,0 +1,61 @@
+name: Merge guard
+
+# Runs after a PR is merged into develop and flags the two merges that rulesets
+# can't prevent, because they can't set the merge method per source branch:
+#   - a back-merge that was squashed (develop loses main's history), and
+#   - a feature/bugfix PR merged with a merge commit that carried unsigned commits
+#     into develop (the next develop -> stage promotion is then blocked, because
+#     stage requires signed commits).
+# Kept out of branch-policy.yml so merged PRs don't create skipped runs of the
+# required branch-policy and pr-title checks on develop's tip.
+on:
+  pull_request:
+    types: [closed]
+    branches: [develop]
+
+permissions:
+  contents: read
+  pull-requests: write  # to comment on the merged PR
+
+jobs:
+  merge-guard:
+    if: github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check how the PR was merged
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          HEAD: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          report() {
+            echo "::error::$1"
+            # Fork PRs get a read-only token, so the comment may fail; the red check still shows.
+            gh pr comment "$PR" --repo "$REPO" --body "**Merge guard:** $1" || echo "::warning::Could not comment on #$PR."
+            exit 1
+          }
+          parents=$(gh api "repos/$REPO/commits/$SHA" --jq '.parents | length')
+
+          case "$HEAD" in
+            main|release/*|hotfix/*|backmerge/*)
+              if (( parents < 2 )); then
+                case "$HEAD" in
+                  main|release/*) how="Open a new PR from \`$HEAD\` into \`develop\`" ;;
+                  *) how="Restore \`$HEAD\` with the PR's **Restore branch** button (or \`git push origin $HEAD_SHA:refs/heads/$HEAD\`), then open a new PR into \`develop\`" ;;
+                esac
+                report "the back-merge from \`$HEAD\` was squashed, so \`develop\` lost its history and the next promotion will conflict. $how and merge it with **Create a merge commit**."
+              fi
+              echo "OK: back-merge from $HEAD kept history ($parents parents)" ;;
+            *)
+              (( parents < 2 )) && { echo "OK: squash-merged"; exit 0; }
+              unsigned=$(gh api --paginate "repos/$REPO/pulls/$PR/commits" \
+                --jq '.[] | select(.commit.verification.verified | not) | .sha[0:7]' | tr '\n' ' ')
+              if [[ -n "$unsigned" ]]; then
+                report "\`$HEAD\` was merged with a merge commit and brought unsigned commits into \`develop\` ($unsigned). \`stage\` requires signed commits, so the next \`develop\` -> \`stage\` PR will be blocked until an admin uses the emergency merge. Feature and bugfix PRs into \`develop\` must be squash-merged."
+              fi
+              echo "OK: merge commit, but every commit is signed" ;;
+          esac

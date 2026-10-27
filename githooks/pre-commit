@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# pre-commit: enforce the main / release / stage / develop / feature branch model.
+# Install once per clone:  ./scripts/install-hooks.sh
+# Works with bash 3.2+ (stock macOS) and Git for Windows.
+set -euo pipefail
+
+# Treat file names as literal paths, never as glob or pathspec magic.
+export GIT_LITERAL_PATHSPECS=1
+
+red() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+fail() { red "pre-commit: $*"; exit 1; }
+
+branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
+git_dir=$(git rev-parse --git-dir)
+
+# The repository's very first commit has nothing to branch from, so allow it anywhere.
+if git rev-parse -q --verify HEAD >/dev/null; then
+  # 1. No direct commits on long-lived branches (merge commits are allowed).
+  if [[ ! -f "$git_dir/MERGE_HEAD" ]]; then
+    case "$branch" in
+      main|stage|develop|release/*)
+        fail "direct commits to '$branch' are not allowed. Branch off and open a pull request:
+  git switch -c feature/<short-name>" ;;
+    esac
+  fi
+
+  # 2. Branch names must follow the convention.
+  # The prefix is lowercase; the rest may carry an uppercase ticket key (feature/PROJ-123-x).
+  pattern='^(main|stage|develop|(feature|bugfix|hotfix|release|backmerge)/[A-Za-z0-9][A-Za-z0-9._-]*)$'
+  if [[ "$branch" != "DETACHED" && ! "$branch" =~ $pattern ]]; then
+    fail "branch '$branch' does not match the naming rule.
+  Use feature/<name>, bugfix/<name>, hotfix/<name>, backmerge/<name> or release/<x.y.z>
+  (lowercase prefix; the name may use letters, digits, . _ -, e.g. feature/PROJ-123-add-login)."
+  fi
+fi
+
+# Staged files (added, copied, modified, type-changed; renames count as added),
+# read in one call with their mode and blob id. Submodules (mode 160000) are
+# commit pointers, not files, so they are skipped.
+files=() shas=()
+while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+  set -- $meta  # :oldmode newmode oldsha newsha status
+  [[ "$2" == "160000" ]] && continue
+  files+=("$path")
+  shas+=("$4")
+done < <(git diff --cached --raw -z --no-abbrev --no-renames --diff-filter=ACMT)
+[[ ${#files[@]} -eq 0 ]] && exit 0
+
+max_bytes=$((5 * 1024 * 1024))
+errors=0
+
+# 3. Never commit env files or private keys.
+for f in "${files[@]}"; do
+  base=${f##*/}
+  case "$base" in
+    .env.example|.env.sample) ;;
+    .env|.env.*|*.pem|*.key|*.p12|*.pfx|id_rsa|id_dsa|id_ecdsa|id_ed25519|id_ecdsa_sk|id_ed25519_sk)
+      red "  $f: secret, key or environment file — add it to .gitignore"; errors=1 ;;
+  esac
+done
+
+# 4. Block large files (use Git LFS instead). One cat-file call for all blob sizes.
+i=0
+while read -r size; do
+  if (( size > max_bytes )); then
+    red "  ${files[$i]}: $((size / 1024)) KB is over the 5 MB limit — use Git LFS"; errors=1
+  fi
+  i=$((i + 1))
+done < <(printf '%s\n' "${shas[@]}" | git cat-file --batch-check='%(objectsize)')
+
+# 5 and 6. Scan the staged content of text files (-I skips binaries), in chunks
+# so the command line stays short enough for Git for Windows.
+markers='^(<<<<<<<|>>>>>>>)( |$)'
+secrets='AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}|xox[baprs]-[A-Za-z0-9-]{10,}'
+scan() {  # scan <pattern> <message>
+  local start=0 chunk=200 hit
+  while (( start < ${#files[@]} )); do
+    while IFS= read -r -d '' hit; do
+      red "  $hit: $2"; errors=1
+    done < <(git grep --cached -I -l -z -E -e "$1" -- "${files[@]:start:chunk}" || true)
+    start=$((start + chunk))
+  done
+}
+scan "$markers" "contains merge-conflict markers"
+scan "$secrets" "looks like it contains a secret (AWS key, private key, GitHub or Slack token)"
+
+(( errors )) && fail "commit blocked. Fix the files above, or bypass once with --no-verify if you are sure."
+
+# 7. Optional: run the project's linter on every commit (uncomment for your stack).
+# npm run lint --if-present
+# ruff check .
+
+exit 0
